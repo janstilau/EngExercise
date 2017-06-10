@@ -1,0 +1,334 @@
+@interface DBObject : NSObject
+
+- (NSArray *)properties;
+- (NSDictionary *)dictionary;
+- (void)populateWithObject:(id)object
+@end
+
+@implementaion
+- (NSDictionary *)dictionary
+{
+    NSMutableDictionary *dic = [NSMutableDictionary dictionary];
+    for (NSString *key in [self properties]) {
+        id value = [self valueForKey:key];
+        /*
+        if (value && [value isKindOfClass:[DBObject class]]) {
+            value = [value dictionary];
+        } else if (value && [value isKindOfClass:[NSArray class]]) {
+            NSMutableArray *array = [NSMutableArray array];
+            for (id obj in value) {
+                if ([obj isKindOfClass:[DBObject class]]) [array addObject:[obj dictionary]];
+                else [array addObject:obj];
+            }
+            value = array;
+        }
+        */
+        
+        if (!value && !removesKeysWithNullValues) {
+            [dic setValue:[NSNull null] forKey:key];
+        } else {
+            [dic setValue:value forKey:key];
+        }
+    }
+    
+    return dic;
+}
+
+- (NSArray *)properties
+{
+    return [[self class] propertiesOfClass:[self class] baseClass:[NSObject class]];
+}
+
++ (NSArray *)propertiesOfClass:(Class)class baseClass:(Class)baseClass
+{
+    NSMutableArray *array = [NSMutableArray array];
+    while ((class != baseClass) && [class isSubclassOfClass:baseClass]) {
+        NSArray *pros = [self propertiesOfMemberClass:class];
+        NSIndexSet *indexSet = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, pros.count)];
+        [array insertObjects:pros atIndexes:indexSet];
+        class = [class superclass];
+    }
+    return [array copy];
+}
+
++ (NSArray *)propertiesOfMemberClass:(Class)class
+{
+    unsigned int outCount, i;
+    objc_property_t *properties = class_copyPropertyList(class, &outCount);
+    NSMutableArray *propertys = [NSMutableArray arrayWithCapacity:outCount];
+
+    NSArray *newProperties = @[@"superclass", @"description", @"debugDescription", @"hash"];
+    
+    for(i = 0; i < outCount; i++) {
+        objc_property_t property = properties[i];
+        const char *propertyName = property_getName(property);
+        NSString *name = [NSString stringWithCString:propertyName encoding:NSUTF8StringEncoding];
+        if (![newProperties containsObject:name]) {
+            [propertys addObject:name];
+        }
+    }
+    free(properties);
+    
+    return [propertys copy];
+}
+
+- (void)populateWithObject:(id)object
+{
+    if (!object) {
+        return;
+    }
+    
+    NSArray *properties = nil;
+    NSDictionary *mapper = nil;
+    
+    if ([object isKindOfClass:[NSDictionary class]]){
+        properties = [object allKeys];
+    } else {
+        properties = [[self class] propertiesWithClass:[object class]];
+    }
+    
+    mapper = [[self class] propertyMapper];
+    
+    [properties enumerateObjectsUsingBlock:^(NSString *key, NSUInteger idx, BOOL * _Nonnull stop) {
+        @try {
+            [self populateValue:[object valueForKey:key] forKey:key];
+        }@catch (NSException *exception) { }
+    }];
+    ...    
+}
+
+- (void)populateValue:(id)value forKey:(NSString *)key
+{
+    @try {
+        NSString *type_string = [self typeWithKey:key];
+        if (!type_string.length) return;
+        
+        const char *raw_type = [type_string UTF8String];
+        if (strcmp(raw_type, @encode(int)) == 0) {
+            value = [NSNumber numberWithInt:[value intValue]];
+        } else if (strcmp(raw_type, @encode(BOOL)) == 0) {
+            value = [NSNumber numberWithBool:[value boolValue]];
+        } else if (strcmp(raw_type, @encode(float)) == 0) {
+            value = [NSNumber numberWithFloat:[value floatValue]];
+        } else if (strcmp(raw_type, @encode(double)) == 0) {
+            value = [NSNumber numberWithDouble:[value doubleValue]];
+        } else if (strcmp(raw_type, @encode(char)) == 0) {
+            value = [NSNumber numberWithChar:[value charValue]];
+        } else if (strcmp(raw_type, @encode(short)) == 0) {
+            value = [NSNumber numberWithShort:[value shortValue]];
+        } else if (strcmp(raw_type, @encode(long)) == 0) {
+            if([value respondsToSelector:@selector(longValue)]) value = [NSNumber numberWithLong:[value longValue]];
+            else value = [NSNumber numberWithLong:[value intValue]];
+        } else if (strcmp(raw_type, @encode(long long)) == 0) {
+            value = [NSNumber numberWithLongLong:[value longLongValue]];
+        } else if (strcmp(raw_type, @encode(unsigned char)) == 0) {
+            value = [NSNumber numberWithUnsignedChar:[value unsignedCharValue]];
+        } else if (strcmp(raw_type, @encode(unsigned int)) == 0) {
+            value = [NSNumber numberWithUnsignedInt:[value unsignedIntValue]];
+        } else if (strcmp(raw_type, @encode(unsigned short)) == 0) {
+            value = [NSNumber numberWithUnsignedShort:[value unsignedShortValue]];
+        } else if (strcmp(raw_type, @encode(unsigned long)) == 0) {
+            if([value respondsToSelector:@selector(unsignedLongValue)]) value = [NSNumber numberWithLong:[value unsignedLongValue]];
+            else value = [NSNumber numberWithLong:[value unsignedIntValue]];
+        } else if (strcmp(raw_type, @encode(unsigned long long)) == 0) {
+            value = [NSNumber numberWithUnsignedLongLong:[value unsignedLongLongValue]];
+        } else if (type_string.length>3 && [type_string hasPrefix:@"@\""] && [type_string hasSuffix:@"\""]) {
+            NSRange range = NSMakeRange(2, type_string.length-3);
+            Class class = NSClassFromString([type_string substringWithRange:range]);
+            value = [self objectWithKey:key value:value class:class];
+        } else if ([type_string hasPrefix:@"{"]) {
+            value = [self structWithType:type_string value:value];
+        }
+        
+        [self setValue:value forKey:key];
+    }
+    @catch (NSException *exception) {
+        DLOG(@"populate key:%@ value:%@ exception: %@", key, value, exception);
+    }
+}
+
+- (NSArray *)attributesWithKey:(NSString *)key
+{
+    objc_property_t property = class_getProperty([self class], [key UTF8String]);
+    if (!property) {
+        return @[];
+    }
+    
+    const char *property_type = property_getAttributes(property);
+    NSString *typeString = [NSString stringWithUTF8String:property_type];
+   
+    return [typeString componentsSeparatedByString:@","];
+}
+
+
+- (id)objectWithKey:(NSString *)key value:(id)value class:(Class)class
+{  
+    id toClass = [[[self class] propertyGenericClass] objectForKey:key];
+
+    if (class == [NSMutableDictionary class]) {
+        ConvertValueToObject
+        if (value && [value isKindOfClass:[NSDictionary class]]) {
+            value = [NSMutableDictionary dictionaryWithDictionary:value];
+        } else {
+            value = [NSMutableDictionary dictionary];
+        }
+    }
+    else if (class == [NSMutableArray class]) {
+        ConvertValueToObject
+        if (value && [value isKindOfClass:[NSArray class]]) {
+            if (toClass) {
+                NSMutableArray *array = [NSMutableArray array];
+                for (id item in value) {
+                    [array addObject:[self objectWithValue:item toClass:toClass]];
+                }
+                value = array;
+            } else {
+                value = [NSMutableArray arrayWithArray:value];
+            }
+        } else {
+            value = [NSMutableArray array];
+        }
+    }
+    else if (class == [NSDictionary class]) {
+        ConvertValueToObject
+        if (![value isKindOfClass:[NSDictionary class]]) {
+            value = nil;
+        }
+    }
+    else if (class == [NSArray class]) {
+        ConvertValueToObject
+        if (![value isKindOfClass:[NSArray class]] && ![value isKindOfClass:[NSOrderedSet class]] && ![value isKindOfClass:[NSSet class]]) {
+            value = nil;
+        } else if (toClass) {
+            NSMutableArray *array = [NSMutableArray array];
+            for (id item in value) {
+                [array addObject:[self objectWithValue:item toClass:toClass]];
+            }
+            value = [NSArray arrayWithArray:array];
+        }
+    }
+    else if (class == [NSDate class]) {
+        value = [self dateWithValue:value];
+    }
+    else if (class == [UIColor class]) {
+        value = [self colorWithValue:value];
+    }
+    else if (class == [NSString class]) {
+        value = [value stringValue];
+    }
+    else if(toClass) {
+        value = [self objectWithValue:value toClass:toClass];
+    }
+    
+    return value;
+}
+
+- (id)objectWithValue:(id)value toClass:(id)toClass
+{
+    if (toClass && [toClass isKindOfClass:[NSString class]]) {
+        toClass = NSClassFromString(toClass);
+    }
+    
+    if (!toClass) return value;
+    
+    if (toClass) {
+        id obj = [[toClass alloc] init];
+        if ([obj isKindOfClass:[DBObject class]]) {
+            [(DBObject *)obj populateWithObject:value];
+            return obj;
+        }
+    }
+    return value;
+}
+
+ 
+- (id)structWithType:(NSString *)type value:(id)value
+{
+    if (!value || ![value isKindOfClass:[NSString class]]) return value;
+    
+    // 32 bit || 64 bit
+    if ([type isEqualToString:@"{CGSize=ff}"] || [type isEqualToString:@"{CGSize=dd}"]) {
+        return [NSValue valueWithCGSize:CGSizeFromString(value)];
+    }
+    else if ([type isEqualToString:@"{CGPoint=ff}"] || [type isEqualToString:@"{CGPoint=dd}"]) {
+        return [NSValue valueWithCGPoint:CGPointFromString(value)];
+    }
+    else if ([type isEqualToString:@"{CGRect={CGPoint=ff}{CGSize=ff}}"] || [type isEqualToString:@"{CGRect={CGPoint=dd}{CGSize=dd}}"]) {
+        return [NSValue valueWithCGRect:CGRectFromString(value)];
+    }
+    else if ([type isEqualToString:@"{CGAffineTransform=ffffff}"] || [type isEqualToString:@"{CGAffineTransform=dddddd}"]) {
+        return [NSValue valueWithCGAffineTransform:CGAffineTransformFromString(value)];
+    }
+    else if ([type isEqualToString:@"{UIEdgeInsets=ffff}"] || [type isEqualToString:@"{UIEdgeInsets=dddd}"]) {
+        return [NSValue valueWithUIEdgeInsets:UIEdgeInsetsFromString(value)];
+    }
+    else if ([type isEqualToString:@"{UIOffset=ff}"] || [type isEqualToString:@"{UIOffset=dd}"]) {
+        return [NSValue valueWithUIOffset:UIOffsetFromString(value)];
+    }
+    return value;
+}
+
+- (NSDate *)dateWithValue:(id)value
+{
+    NSDate *date = nil;
+    if ([value isKindOfClass:[NSDate class]]) {
+        date = value;
+    }
+    else if ([value isKindOfClass:[NSNumber class]]) {
+        date = [NSDate dateWithTimeStamp:[value doubleValue]];
+    }
+    else if ([value isKindOfClass:[NSString class]]) {
+        if ([value length] == 10 || [value length] == 13 ) {
+            date = [NSDate dateWithTimeStamp:[value doubleValue]];
+        }
+        else if ([value length] == 19) {
+            date = [value dateWithDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+        }
+        else if ([value length] == 16) {
+            date = [value dateWithDateFormat:@"yyyy-MM-dd HH:mm"];
+        }
+    }
+    
+    return date;
+}
+
+- (UIColor *)colorWithValue:(id)value
+{
+    UIColor *color = nil;
+    if ([value isKindOfClass:[UIColor class]]) {
+        color = value;
+    }
+    else if ([value isKindOfClass:[NSString class]]) {
+        NSString *hexstr = value;
+        if ([hexstr hasPrefix:@"#"]) {
+            hexstr = [hexstr substringFromIndex:1];
+        }
+        
+        unsigned int hexValue;
+        [[NSScanner scannerWithString:hexstr] scanHexInt: &hexValue];
+        return HexColor(hexValue);
+    }
+    
+    return color;
+}
+
+@end 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
